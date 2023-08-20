@@ -1,7 +1,6 @@
 #include <cstdio>
 #include <netinet/in.h>
 #include <strings.h>
-#include <sys/_endian.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <cstring>
@@ -36,7 +35,7 @@ int main() {
         } else if (read_bytes == 0) {
             printf("server fd %d disconnected", sockfd);
             break;
-        } else if (write_bytes == -1) {
+        } else if (read_bytes == -1) {
             close(sockfd);
             errif(true, "socket read error");
         }

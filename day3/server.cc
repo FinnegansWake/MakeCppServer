@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include "util.h"
+#include <errno.h>
 
 /* 
     The code snippet you provided is a C function named `setnonblocking` that takes an integer file descriptor `fd` as an argument and sets the non-blocking mode for that file descriptor using the `fcntl` function. Let's break down what each part of the code does:
@@ -33,6 +34,7 @@ void setnonblocking(int fd) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
 }
 
+// Use epoll edge trigger mode
 int main() {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     errif(sockfd == -1, "socket create error");
@@ -47,31 +49,62 @@ int main() {
     
     errif(listen(sockfd, SOMAXCONN) == -1, "socket listen error");
 
-    
+    int epfd = epoll_create1(0);
+    errif(epfd == -1, "epoll create error");
 
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-    bzero(&client_addr, sizeof(client_addr));
-
-    int client_sockfd = accept(sockfd, (sockaddr*)&client_addr, &client_addr_len);
-    errif(client_sockfd == -1, "socket accept");
-
-    printf("new client fd %d! IP: %s Port: %d\n", client_sockfd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+    struct epoll_event events[MAX_EVENTS], ev;
+    bzero(&events, sizeof(events));
+    bzero(&ev, sizeof(ev));
+    ev.data.fd = sockfd;
+    ev.events = EPOLLIN | EPOLLET;
+    setnonblocking(sockfd);
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev);
 
     while (true) {
-        char buf[BUFFER_SIZE];
-        bzero(buf, sizeof(buf));
-        auto read_bytes = read(client_sockfd, buf, sizeof(buf));
-        if (read_bytes > 0) {
-            printf("message from client fd %d: %s\n", client_sockfd, buf);
-            write(client_sockfd, buf, sizeof(buf));
-        } else if (read_bytes == 0) {
-            printf("client fd %d disconnected", client_sockfd);
-            close(client_sockfd);
-            break;
-        } else if (read_bytes == -1) {
-            close(client_sockfd);
-            errif(true, "socket read error");
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        errif(nfds == -1, "epoll_wait error");
+        for (int i = 0; i < nfds; ++i) {
+            // sockfd用于accept，代表新的客户端连接出现
+            if (events[i].data.fd == sockfd) {
+                struct sockaddr_in client_addr;
+                socklen_t client_addr_len = sizeof(client_addr);
+                bzero(&client_addr, client_addr_len);
+
+                int client_sockfd = accept(sockfd, (sockaddr*)&client_addr, &client_addr_len);
+                errif(client_sockfd == -1, "socket accpet error");
+                printf("new client fd %d! IP: %s Port: %d\n", client_sockfd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+
+                ev.data.fd = client_sockfd;
+                ev.events = EPOLLIN | EPOLLET;
+                setnonblocking(client_sockfd);
+                epoll_ctl(epfd, EPOLL_CTL_ADD, client_sockfd, &ev);
+            } else if (events[i].events & EPOLLIN) {
+                // 边缘触发，一次性把buffer都读完
+                char buf[BUFFER_SIZE];
+                while (true) {
+                    bzero(&buf, sizeof(buf));
+                    auto client_accessfd = events[i].data.fd;
+                    auto bytes_read = read(client_accessfd, buf, sizeof(buf));
+                    if (bytes_read > 0) {
+                        printf("message from client fd %d: %s\n", client_accessfd, buf);
+                        // echo逻辑
+                        write(client_accessfd, buf, bytes_read);
+                    } else if (bytes_read == -1 && errno == EINTR) {
+                        // 慢系统调用捕获信号
+                        printf("Catch signal, continue");
+                        continue;
+                    } else if (bytes_read == -1 && ((errno == EAGAIN || errno == EWOULDBLOCK))) {
+                        printf("EAGAIN Or EWOULDBLOCK: %d\n", errno);
+                        break;
+                    } else if (bytes_read == 0) {
+                        printf("EOF, client fd: %d disconnected\n", client_accessfd);
+                        close(client_accessfd);
+                        break;
+                    }
+                } 
+            } else {
+                printf("To Be Continued...\n");
+            }
         }
     }
     close(sockfd);
